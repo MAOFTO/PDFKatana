@@ -109,15 +109,35 @@ def test_repair_pdf_success():
 
         mock_pdf.docinfo = {"Title": "Test Document"}
 
-        mock_open.return_value.__enter__.return_value = mock_pdf
+        # Mock the copy_foreign method to work properly
+        mock_page_copy = MagicMock()
+        mock_page_copy.mediabox = None
+        mock_page_copy.MediaBox = MagicMock()
 
-        buffer = BytesIO(b"mock pdf content")
+        # Mock the repaired PDF
+        mock_repaired_pdf = MagicMock()
+        mock_repaired_pdf.pages = MagicMock()
+        mock_repaired_pdf.pages.append = MagicMock()
+        mock_repaired_pdf.docinfo = {}
+        mock_repaired_pdf.save = MagicMock()
 
-        repaired_buffer, success, notes = PDFValidator.repair_pdf(buffer)
+        # Mock the copy_foreign method to return our mock page copy
+        mock_repaired_pdf.copy_foreign.return_value = mock_page_copy
 
-        assert success is True
-        assert len(notes) > 0
-        assert "Created default mediabox" in notes[0]
+        # Mock pikepdf.Pdf.new() to return our repaired PDF
+        with patch("pikepdf.Pdf.new") as mock_pdf_new:
+            mock_pdf_new.return_value = mock_repaired_pdf
+
+            mock_open.return_value.__enter__.return_value = mock_pdf
+
+            buffer = BytesIO(b"mock pdf content")
+
+            repaired_buffer, success, notes = PDFValidator.repair_pdf(buffer)
+
+            assert success is True
+            assert len(notes) > 0
+            # Check for the expected repair note about creating default mediabox
+            assert any("Created default mediabox" in note for note in notes)
 
 
 def test_repair_pdf_failure():

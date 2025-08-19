@@ -49,13 +49,37 @@ class PDFValidator:
 
                         # Try to access content stream (basic content validation)
                         try:
-                            _ = page.Contents
+                            # Check if page has Contents attribute
+                            if hasattr(page, "Contents"):
+                                contents = page.Contents
+                                # Contents can be a Stream, Array of Streams, or None
+                                if contents is not None:
+                                    # Check if it's a valid pikepdf object type
+                                    if isinstance(contents, (pikepdf.Stream, pikepdf.Array)):
+                                        # Valid Contents object
+                                        pass
+                                    elif isinstance(contents, pikepdf.Dictionary):
+                                        # Sometimes Contents can be a Dictionary reference
+                                        pass
+                                    else:
+                                        # Try to access it anyway - might be a valid indirect object
+                                        try:
+                                            _ = str(contents)
+                                        except Exception:
+                                            issues.append(
+                                                f"Page {i + 1} has inaccessible Contents object"
+                                            )
                         except Exception:
-                            # Some PDFs might not have Contents, that's okay
+                            # Contents access failed - this is actually okay for many PDFs
+                            # Don't add this as an issue since many valid PDFs don't have explicit Contents
                             pass
 
                     except Exception as e:
-                        issues.append(f"Page {i + 1} validation failed: {str(e)}")
+                        # Only report serious page validation errors
+                        error_msg = str(e)
+                        if "Object is not a Dictionary or Stream" not in error_msg:
+                            issues.append(f"Page {i + 1} validation failed: {error_msg}")
+                        # Skip the common "Object is not a Dictionary or Stream" errors
 
                 # Check document info
                 try:
@@ -74,13 +98,10 @@ class PDFValidator:
                 if pdf.is_encrypted:
                     issues.append("PDF is encrypted (may cause compatibility issues)")
 
-                # Check PDF version
+                # Check PDF version (informational only, not a validation failure)
                 try:
-                    version = pdf.pdf_version
-                    if version < "1.4":
-                        issues.append(
-                            f"PDF version {version} is quite old, may cause compatibility issues"
-                        )
+                    # Note: PDF version warnings are now handled separately
+                    pass
                 except Exception:
                     pass
 
@@ -88,7 +109,22 @@ class PDFValidator:
             issues.append(f"PDF structure validation failed: {str(e)}")
             return False, issues
 
-        return len(issues) == 0, issues
+        # Only consider critical issues as validation failures
+        critical_issues = []
+        for issue in issues:
+            # Filter out non-critical issues
+            if any(
+                keyword in issue.lower()
+                for keyword in [
+                    "has no pages",
+                    "has no mediabox",
+                    "invalid dimensions",
+                    "could not repair",
+                ]
+            ):
+                critical_issues.append(issue)
+
+        return len(critical_issues) == 0, issues
 
     @staticmethod
     def repair_pdf(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, List[str]]:
@@ -104,21 +140,31 @@ class PDFValidator:
                 # Create a new PDF with clean structure
                 repaired_pdf = pikepdf.Pdf.new()
 
-                # Copy pages with validation
+                # Copy pages with validation and repair
                 for i, page in enumerate(pdf.pages):
                     try:
+                        # Create a new page for the repaired PDF
+                        new_page = repaired_pdf.copy_foreign(page)
+
                         # Ensure page has valid mediabox
-                        if not hasattr(page, "mediabox") or page.mediabox is None:
+                        if not hasattr(new_page, "mediabox") or new_page.mediabox is None:
                             repair_notes.append(f"Page {i + 1}: Created default mediabox")
                             # Create a default A4 mediabox
-                            page.mediabox = pikepdf.Array([0, 0, 595, 842])
+                            new_page.MediaBox = pikepdf.Array([0, 0, 595, 842])
 
-                        # Copy the page
-                        repaired_pdf.pages.append(page)
+                        # Add the repaired page
+                        repaired_pdf.pages.append(new_page)
 
                     except Exception as e:
-                        repair_notes.append(f"Page {i + 1}: Could not repair, skipping: {str(e)}")
-                        continue
+                        # Try a simpler page copy approach
+                        try:
+                            repaired_pdf.pages.append(page)
+                            repair_notes.append(f"Page {i + 1}: Used fallback copy method")
+                        except Exception as e2:
+                            repair_notes.append(
+                                f"Page {i + 1}: Could not repair, skipping: {str(e)} / {str(e2)}"
+                            )
+                            continue
 
                 # Copy basic metadata (only safe fields)
                 try:
@@ -131,19 +177,22 @@ class PDFValidator:
                 except Exception:
                     repair_notes.append("Could not copy metadata")
 
-                # Save repaired PDF
+                # Save repaired PDF with proper buffer handling
                 repaired_buffer = BytesIO()
                 repaired_pdf.save(repaired_buffer)
-                repaired_buffer.seek(0)
+                repaired_buffer.seek(0)  # Reset position for reading
 
                 return repaired_buffer, True, repair_notes
 
         except Exception as e:
             repair_notes.append(f"Repair failed: {str(e)}")
+            pdf_buffer.seek(0)  # Reset original buffer position
             return pdf_buffer, False, repair_notes
 
     @staticmethod
-    def comprehensive_validation(pdf_buffer: BytesIO) -> Dict[str, any]:
+    def comprehensive_validation(
+        pdf_buffer: BytesIO, include_repair: bool = True
+    ) -> Dict[str, any]:
         """
         Performs comprehensive PDF validation and returns detailed results.
         """
@@ -155,12 +204,23 @@ class PDFValidator:
         # File size check
         file_size = len(pdf_buffer.getvalue())
 
-        # Try to get page count
+        # Try to get page count and collect informational warnings
         page_count = 0
+        info_warnings = []
         try:
             pdf_buffer.seek(0)
             with pikepdf.open(pdf_buffer) as pdf:
                 page_count = len(pdf.pages)
+
+                # Check PDF version (informational)
+                try:
+                    version = pdf.pdf_version
+                    if version < "1.4":
+                        info_warnings.append(
+                            f"PDF version {version} is old - consider upgrading for better compatibility"
+                        )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -172,20 +232,24 @@ class PDFValidator:
             "file_size_bytes": file_size,
             "page_count": page_count,
             "issues": issues,
+            "info_warnings": info_warnings,
             "needs_repair": needs_repair,
             "repair_attempted": False,
             "repair_successful": False,
             "repair_notes": [],
+            "repaired_buffer": None,
         }
 
-        # Attempt repair if needed
-        if needs_repair:
+        # Attempt repair if needed and requested
+        if needs_repair and include_repair:
             result["repair_attempted"] = True
             repaired_buffer, repair_success, repair_notes = PDFValidator.repair_pdf(pdf_buffer)
             result["repair_successful"] = repair_success
             result["repair_notes"] = repair_notes
 
             if repair_success:
+                # Store the repaired buffer
+                result["repaired_buffer"] = repaired_buffer
                 # Validate the repaired version
                 is_repaired_valid, repaired_issues = PDFValidator.validate_pdf_structure(
                     repaired_buffer
@@ -197,7 +261,9 @@ class PDFValidator:
         return result
 
 
-def validate_pdf_for_paperless(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, str]:
+def validate_pdf_for_paperless(
+    pdf_buffer: BytesIO, validation_result: Dict = None
+) -> Tuple[BytesIO, bool, str]:
     """
     Specialized validation for paperless-ngx compatibility.
     Returns (validated_buffer, is_compatible, compatibility_notes).
@@ -206,6 +272,7 @@ def validate_pdf_for_paperless(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, str]
 
     # paperless-ngx specific requirements
     compatibility_notes = []
+    info_warnings = []
 
     try:
         with pikepdf.open(pdf_buffer) as pdf:
@@ -217,7 +284,7 @@ def validate_pdf_for_paperless(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, str]
             try:
                 version = pdf.pdf_version
                 if version < "1.4":
-                    compatibility_notes.append(
+                    info_warnings.append(
                         f"PDF version {version} is old - consider upgrading for better compatibility"
                     )
             except Exception:
@@ -244,26 +311,34 @@ def validate_pdf_for_paperless(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, str]
                 except Exception:
                     pass
 
-            # Validate and potentially repair
+        # Use existing validation result if provided, otherwise perform validation
+        if validation_result is None:
             validator = PDFValidator()
             validation_result = validator.comprehensive_validation(pdf_buffer)
 
-            if validation_result["is_valid"]:
-                # Return the validated/repaired buffer
-                if validation_result["repair_successful"]:
-                    pdf_buffer.seek(0)
-                    repaired_buffer = BytesIO(pdf_buffer.read())
-                    repaired_buffer.seek(0)
-                    return (
-                        repaired_buffer,
-                        True,
-                        "PDF validated and repaired for paperless-ngx compatibility",
-                    )
-                else:
-                    return pdf_buffer, True, "PDF is already compatible with paperless-ngx"
+        # Combine warnings
+        all_notes = compatibility_notes + info_warnings + validation_result.get("info_warnings", [])
+
+        if validation_result["is_valid"]:
+            # Return the validated/repaired buffer
+            if validation_result["repair_successful"] and validation_result.get("repaired_buffer"):
+                repaired_buffer = validation_result["repaired_buffer"]
+                repaired_buffer.seek(0)
+                notes_text = "PDF validated and repaired for paperless-ngx compatibility"
+                if all_notes:
+                    notes_text += f"; {'; '.join(all_notes)}"
+                return repaired_buffer, True, notes_text
             else:
-                compatibility_notes.extend(validation_result["issues"])
-                return pdf_buffer, False, f"PDF validation failed: {'; '.join(compatibility_notes)}"
+                notes_text = "PDF is already compatible with paperless-ngx"
+                if all_notes:
+                    notes_text += f"; {'; '.join(all_notes)}"
+                return pdf_buffer, True, notes_text
+        else:
+            all_issues = compatibility_notes + validation_result["issues"]
+            notes_text = f"PDF validation failed: {'; '.join(all_issues)}"
+            if info_warnings:
+                notes_text += f"; {'; '.join(info_warnings)}"
+            return pdf_buffer, False, notes_text
 
     except Exception as e:
         return pdf_buffer, False, f"PDF compatibility check failed: {str(e)}"

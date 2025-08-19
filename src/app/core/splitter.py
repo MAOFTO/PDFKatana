@@ -5,32 +5,39 @@ from typing import List, Tuple
 
 import pikepdf
 
-from app.core.validator import validate_pdf_for_paperless
+from app.core.validator import PDFValidator, validate_pdf_for_paperless
 
 
-def validate_and_repair_pdf(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool]:
+def validate_and_repair_pdf(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool, str]:
     """
     Validates and optionally repairs a PDF buffer using paperless-ngx specific validation.
-    Returns (validated_buffer, is_valid).
+    Returns (validated_buffer, is_valid, notes).
     """
     try:
-        # Use specialized validation for paperless-ngx compatibility
-        validated_buffer, is_compatible, notes = validate_pdf_for_paperless(pdf_buffer)
+        # First perform comprehensive validation
+        validator = PDFValidator()
+        validation_result = validator.comprehensive_validation(pdf_buffer)
+
+        # Use specialized validation for paperless-ngx compatibility with existing result
+        validated_buffer, is_compatible, notes = validate_pdf_for_paperless(
+            pdf_buffer, validation_result
+        )
 
         if not is_compatible:
             print(f"[validate_and_repair_pdf] PDF validation failed: {notes}")
-            return pdf_buffer, False
+            return pdf_buffer, False, notes
 
         if notes and "repaired" in notes.lower():
             print(f"[validate_and_repair_pdf] PDF repaired: {notes}")
         else:
             print(f"[validate_and_repair_pdf] PDF validated: {notes}")
 
-        return validated_buffer, True
+        return validated_buffer, True, notes
 
     except Exception as e:
-        print(f"[validate_and_repair_pdf] PDF validation failed: {e}")
-        return pdf_buffer, False
+        error_msg = f"PDF validation failed: {e}"
+        print(f"[validate_and_repair_pdf] {error_msg}")
+        return pdf_buffer, False, error_msg
 
 
 def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
@@ -115,15 +122,20 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
                 buf.seek(0)
 
                 # Validate and repair the output PDF for paperless-ngx compatibility
-                validated_buf, is_valid = validate_and_repair_pdf(buf)
+                validated_buf, is_valid, validation_notes = validate_and_repair_pdf(buf)
 
                 if is_valid:
                     output_parts.append(validated_buf)
                     print(f"[split_pdf] Part {idx + 1} validated successfully for paperless-ngx")
+                    # Log informational warnings if any
+                    if "old" in validation_notes.lower() or "version" in validation_notes.lower():
+                        print(f"[split_pdf] Part {idx + 1} info: {validation_notes}")
                 else:
                     print(
                         f"[split_pdf] WARNING: Part {idx + 1} failed validation, attempting basic repair..."
                     )
+                    print(f"[split_pdf] Part {idx + 1} issues: {validation_notes}")
+
                     # Try to create a minimal valid PDF as fallback
                     fallback_pdf = pikepdf.Pdf.new()
                     for page in pdf.pages[start:end]:
@@ -134,7 +146,7 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
                     fallback_buf.seek(0)
 
                     # Try validation again on the fallback
-                    final_buf, final_valid = validate_and_repair_pdf(fallback_buf)
+                    final_buf, final_valid, final_notes = validate_and_repair_pdf(fallback_buf)
                     if final_valid:
                         output_parts.append(final_buf)
                         print(
@@ -144,6 +156,7 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
                         print(
                             f"[split_pdf] ERROR: Part {idx + 1} could not be repaired for paperless-ngx"
                         )
+                        print(f"[split_pdf] Part {idx + 1} final issues: {final_notes}")
                         # Still add it but log the issue
                         output_parts.append(buf)
 
