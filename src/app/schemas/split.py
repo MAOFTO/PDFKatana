@@ -3,14 +3,25 @@ from typing import List
 from pydantic import BaseModel, Field, field_validator
 
 
-class SplitRequest(BaseModel):
-    separators: List[int] = Field(..., description="1-based page indices where new slices start.")
+class PageSplit(BaseModel):
+    page: int = Field(..., description="Page number where a new part should start (1-based)")
 
-    @field_validator("separators")
+    @field_validator("page")
     @classmethod
-    def check_min_length(cls, v):
+    def validate_page_number(cls, v):
+        if v < 1:
+            raise ValueError("Page number must be 1 or greater")
+        return v
+
+
+class SplitRequest(BaseModel):
+    pages: List[PageSplit] = Field(..., description="List of page numbers where new parts start")
+
+    @field_validator("pages")
+    @classmethod
+    def validate_pages_list(cls, v):
         if not v or len(v) < 1:
-            raise ValueError("At least one separator is required.")
+            raise ValueError("At least one page must be specified")
         return v
 
 

@@ -6,6 +6,6 @@ RUN pip install --upgrade pip && pip install --prefix=/install -r requirements.t
 FROM python:3.11.4-slim
 WORKDIR /app/src
 COPY --from=builder /install /usr/local
-COPY . .
+COPY src/ .
 ENV PYTHONUNBUFFERED=1
 CMD ["gunicorn", "-c", "gunicorn_conf.py", "-b", "0.0.0.0:8000", "app.main:app"] 

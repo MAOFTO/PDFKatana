@@ -1,12 +1,14 @@
 import json
 import os
 import tempfile
+import time
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.core.splitter import split_pdf
+from app.schemas.split import SplitRequest
 from app.utils.logger import logger
 
 router = APIRouter()
@@ -17,47 +19,59 @@ async def split_endpoint(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    separators: str = Form(...),
+    pages: str = Form(...),
 ):
+    start_time = time.time()
+    request_id = str(time.time())  # Simple request ID for logging
+
+    logger.info(f"Request {request_id}: Starting PDF split for file {file.filename}")
+
     # Validate file size
     contents = await file.read()
+    file_size_mb = len(contents) / (1024 * 1024)
+    logger.info(f"Request {request_id}: File size {file_size_mb:.2f} MB")
+
     if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        logger.warning(f"Request {request_id}: File too large ({file_size_mb:.2f} MB)")
         raise HTTPException(status_code=413, detail="File too large.")
+
     # Save to temp file
     with tempfile.NamedTemporaryFile(delete=False, dir="tmp", suffix=".pdf") as tmp:
         tmp.write(contents)
         tmp_path = tmp.name
-    # Parse separators
+
+    logger.info(f"Request {request_id}: Saved to temp file {tmp_path}")
+
+    # Parse pages JSON
     try:
-        try:
-            sep_obj = json.loads(separators)
-        except Exception:
-            sep_obj = separators  # fallback to raw string if not JSON
-        if isinstance(sep_obj, dict) and "separators" in sep_obj:
-            sep_list = sep_obj["separators"]
-        elif isinstance(sep_obj, list):
-            sep_list = sep_obj
-        elif isinstance(sep_obj, str):
-            # Try to parse a comma-separated string or a quoted array
-            sep_str = sep_obj.strip()
-            if sep_str.startswith("[") and sep_str.endswith("]"):
-                # Try to parse as JSON array string
-                sep_list = json.loads(sep_str)
-            else:
-                sep_list = [int(x.strip()) for x in sep_str.split(",") if x.strip()]
-        else:
-            raise ValueError
-        sep_list = [int(x) for x in sep_list]
-    except Exception:
-        os.remove(tmp_path)
-        raise HTTPException(status_code=422, detail="Invalid separators JSON.")
-    # Split PDF
-    try:
-        parts = split_pdf(tmp_path, sep_list)
+        pages_data = json.loads(pages)
+        split_request = SplitRequest(**pages_data)
+        split_pages = [page_obj.page for page_obj in split_request.pages]
+        logger.info(f"Request {request_id}: Split pages: {split_pages}")
     except Exception as e:
         os.remove(tmp_path)
-        logger.error(f"Split error: {e}")
+        logger.error(f"Request {request_id}: Invalid pages JSON: {e}")
+        raise HTTPException(status_code=422, detail="Invalid pages JSON format.")
+
+    # Split PDF
+    try:
+        logger.info(f"Request {request_id}: Starting PDF split operation")
+        parts = split_pdf(tmp_path, split_pages)
+        logger.info(f"Request {request_id}: Split completed, generated {len(parts)} parts")
+    except Exception as e:
+        os.remove(tmp_path)
+        logger.error(f"Request {request_id}: Split error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Record metrics
+    duration = time.time() - start_time
+    from app.api.routes.metrics import split_duration_seconds, split_pages_total
+
+    split_duration_seconds.observe(duration)
+    split_pages_total.inc(len(parts))
+
+    logger.info(f"Request {request_id}: Operation completed in {duration:.2f} seconds")
+
     # Prepare multipart/mixed response
     import uuid
 
@@ -78,6 +92,8 @@ async def split_endpoint(
     # Schedule temp file cleanup
     if background_tasks:
         background_tasks.add_task(os.remove, tmp_path)
+        logger.info(f"Request {request_id}: Scheduled temp file cleanup")
+
     return StreamingResponse(
         iter_parts(),
         media_type=f"multipart/mixed; boundary={boundary}",
