@@ -173,9 +173,13 @@ async def split_into_zip_endpoint(
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for idx, part in enumerate(parts):
             filename = f"{os.path.splitext(file.filename)[0]}_part{idx + 1}.pdf"
-            # Reset file pointer to beginning
+            # Create a fresh BytesIO object with the content
             part.seek(0)
-            zip_file.writestr(filename, part.read())
+            part_content = part.read()
+            # Create new BytesIO to avoid any pointer issues
+            fresh_part = BytesIO(part_content)
+            # Add to ZIP
+            zip_file.writestr(filename, fresh_part.getvalue())
 
     # Reset buffer pointer to beginning
     zip_buffer.seek(0)
@@ -188,11 +192,10 @@ async def split_into_zip_endpoint(
     # Return ZIP file
     zip_filename = f"{os.path.splitext(file.filename)[0]}_split.zip"
 
-    return StreamingResponse(
-        iter([zip_buffer.getvalue()]),
+    from fastapi.responses import Response
+
+    return Response(
+        content=zip_buffer.getvalue(),
         media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{zip_filename}"',
-            "Content-Length": str(zip_buffer.tell()),
-        },
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
     )
