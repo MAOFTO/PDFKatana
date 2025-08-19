@@ -39,6 +39,9 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
     Each specified page becomes the first page of a new part.
     Preserves metadata and adds XMP tag 'Split-Of'.
     Returns a list of validated BytesIO objects for each part.
+
+    Note: Input PDF should be validated and repaired before calling this function.
+    Output parts are also validated to ensure quality delivery.
     """
     try:
         with pikepdf.open(input_path) as pdf:
@@ -111,7 +114,7 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
                 new_pdf.save(buf)
                 buf.seek(0)
 
-                # Validate and repair the PDF for paperless-ngx compatibility
+                # Validate and repair the output PDF for paperless-ngx compatibility
                 validated_buf, is_valid = validate_and_repair_pdf(buf)
 
                 if is_valid:
