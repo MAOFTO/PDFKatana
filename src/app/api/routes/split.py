@@ -6,15 +6,76 @@ import zipfile
 from io import BytesIO
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.core.config import settings
 from app.core.splitter import split_pdf
 from app.core.sweeper import cleanup_temp_files
+from app.core.validator import PDFValidator
 from app.schemas.split import SplitRequest
 from app.utils.logger import logger
 
 router = APIRouter()
+
+
+@router.post("/v1/validate-pdf")
+async def validate_pdf_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """Validate a PDF file for compatibility with paperless-ngx and other systems"""
+    start_time = time.time()
+    request_id = str(time.time())
+
+    logger.info(f"Request {request_id}: Starting PDF validation for file {file.filename}")
+
+    # Validate file size
+    contents = await file.read()
+    file_size_mb = len(contents) / (1024 * 1024)
+    logger.info(f"Request {request_id}: File size {file_size_mb:.2f} MB")
+
+    if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        logger.warning(f"Request {request_id}: File too large ({file_size_mb:.2f} MB)")
+        raise HTTPException(status_code=413, detail="File too large.")
+
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(delete=False, dir="tmp", suffix=".pdf") as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    logger.info(f"Request {request_id}: Saved to temp file {tmp_path}")
+
+    try:
+        # Create BytesIO buffer for validation
+        pdf_buffer = BytesIO(contents)
+
+        # Perform comprehensive validation
+        validator = PDFValidator()
+        validation_result = validator.comprehensive_validation(pdf_buffer)
+
+        # Add file info
+        validation_result["filename"] = file.filename
+        validation_result["original_size_mb"] = file_size_mb
+
+        # Clean up temp file
+        os.remove(tmp_path)
+
+        # Record metrics
+        duration = time.time() - start_time
+        logger.info(f"Request {request_id}: Validation completed in {duration:.2f} seconds")
+
+        # Clean up old temp files
+        cleanup_temp_files()
+
+        return validation_result
+
+    except Exception as e:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        logger.error(f"Request {request_id}: Validation error: {e}")
+        raise HTTPException(status_code=400, detail=f"PDF validation failed: {str(e)}")
 
 
 @router.post("/v1/split")
@@ -191,8 +252,6 @@ async def split_into_zip_endpoint(
 
     # Return ZIP file
     zip_filename = f"{os.path.splitext(file.filename)[0]}_split.zip"
-
-    from fastapi.responses import Response
 
     return Response(
         content=zip_buffer.getvalue(),

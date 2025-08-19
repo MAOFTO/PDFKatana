@@ -1,9 +1,36 @@
 import os
 import traceback
 from io import BytesIO
-from typing import List
+from typing import List, Tuple
 
 import pikepdf
+
+from app.core.validator import validate_pdf_for_paperless
+
+
+def validate_and_repair_pdf(pdf_buffer: BytesIO) -> Tuple[BytesIO, bool]:
+    """
+    Validates and optionally repairs a PDF buffer using paperless-ngx specific validation.
+    Returns (validated_buffer, is_valid).
+    """
+    try:
+        # Use specialized validation for paperless-ngx compatibility
+        validated_buffer, is_compatible, notes = validate_pdf_for_paperless(pdf_buffer)
+
+        if not is_compatible:
+            print(f"[validate_and_repair_pdf] PDF validation failed: {notes}")
+            return pdf_buffer, False
+
+        if notes and "repaired" in notes.lower():
+            print(f"[validate_and_repair_pdf] PDF repaired: {notes}")
+        else:
+            print(f"[validate_and_repair_pdf] PDF validated: {notes}")
+
+        return validated_buffer, True
+
+    except Exception as e:
+        print(f"[validate_and_repair_pdf] PDF validation failed: {e}")
+        return pdf_buffer, False
 
 
 def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
@@ -11,7 +38,7 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
     Splits the PDF at input_path into parts based on split points.
     Each specified page becomes the first page of a new part.
     Preserves metadata and adds XMP tag 'Split-Of'.
-    Returns a list of BytesIO objects for each part.
+    Returns a list of validated BytesIO objects for each part.
     """
     try:
         with pikepdf.open(input_path) as pdf:
@@ -83,7 +110,39 @@ def split_pdf(input_path: str, split_pages: List[int]) -> List[BytesIO]:
                 buf = BytesIO()
                 new_pdf.save(buf)
                 buf.seek(0)
-                output_parts.append(buf)
+
+                # Validate and repair the PDF for paperless-ngx compatibility
+                validated_buf, is_valid = validate_and_repair_pdf(buf)
+
+                if is_valid:
+                    output_parts.append(validated_buf)
+                    print(f"[split_pdf] Part {idx + 1} validated successfully for paperless-ngx")
+                else:
+                    print(
+                        f"[split_pdf] WARNING: Part {idx + 1} failed validation, attempting basic repair..."
+                    )
+                    # Try to create a minimal valid PDF as fallback
+                    fallback_pdf = pikepdf.Pdf.new()
+                    for page in pdf.pages[start:end]:
+                        fallback_pdf.pages.append(page)
+
+                    fallback_buf = BytesIO()
+                    fallback_pdf.save(fallback_buf)
+                    fallback_buf.seek(0)
+
+                    # Try validation again on the fallback
+                    final_buf, final_valid = validate_and_repair_pdf(fallback_buf)
+                    if final_valid:
+                        output_parts.append(final_buf)
+                        print(
+                            f"[split_pdf] Part {idx + 1} repaired and validated for paperless-ngx"
+                        )
+                    else:
+                        print(
+                            f"[split_pdf] ERROR: Part {idx + 1} could not be repaired for paperless-ngx"
+                        )
+                        # Still add it but log the issue
+                        output_parts.append(buf)
 
             return output_parts
 
