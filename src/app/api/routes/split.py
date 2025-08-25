@@ -190,26 +190,106 @@ async def split_endpoint(
 
     logger.info(f"Request {request_id}: Saved validated/repaired PDF to temp file {tmp_path}")
 
-    # Parse pages JSON
+    # Parse pages JSON and determine if we should split
+    should_split = True
+    split_pages = []
+    parts = None
+
     try:
         pages_data = json.loads(pages)
-        split_request = SplitRequest(**pages_data)
-        split_pages = [page_obj.page for page_obj in split_request.pages]
-        logger.info(f"Request {request_id}: Split pages: {split_pages}")
-    except Exception as e:
-        os.remove(tmp_path)
-        logger.error(f"Request {request_id}: Invalid pages JSON: {e}")
-        raise HTTPException(status_code=422, detail="Invalid pages JSON format.")
 
-    # Split PDF (now with validated/repaired input)
-    try:
-        logger.info(f"Request {request_id}: Starting PDF split operation")
-        parts = split_pdf(tmp_path, split_pages)
-        logger.info(f"Request {request_id}: Split completed, generated {len(parts)} parts")
+        # Check if pages field exists and is not empty
+        if "pages" not in pages_data or not pages_data["pages"]:
+            should_split = False
+            logger.info(
+                f"Request {request_id}: Empty or missing pages array, returning original PDF"
+            )
+        else:
+            # Try to parse the pages
+            try:
+                split_request = SplitRequest(**pages_data)
+                split_pages = [page_obj.page for page_obj in split_request.pages]
+
+                # Validate page numbers are in range
+                import pikepdf
+
+                with pikepdf.open(tmp_path) as pdf:
+                    num_pages = len(pdf.pages)
+
+                    for page_num in split_pages:
+                        if page_num < 1 or page_num > num_pages:
+                            should_split = False
+                            logger.info(
+                                f"Request {request_id}: Page {page_num} out of range (1-{num_pages}), returning original PDF"
+                            )
+                            break
+
+                if should_split:
+                    logger.info(f"Request {request_id}: Split pages: {split_pages}")
+
+            except ValueError as ve:
+                # Validation error from SplitRequest (e.g., negative page numbers)
+                should_split = False
+                logger.info(
+                    f"Request {request_id}: Invalid page values: {ve}, returning original PDF"
+                )
+            except Exception as parse_e:
+                # Other parsing errors
+                should_split = False
+                logger.info(
+                    f"Request {request_id}: Failed to parse pages: {parse_e}, returning original PDF"
+                )
+
+    except json.JSONDecodeError as je:
+        should_split = False
+        logger.info(f"Request {request_id}: Invalid JSON format: {je}, returning original PDF")
     except Exception as e:
-        os.remove(tmp_path)
-        logger.error(f"Request {request_id}: Split error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        should_split = False
+        logger.info(
+            f"Request {request_id}: Unexpected error parsing pages: {e}, returning original PDF"
+        )
+
+    # Either split the PDF or return the original
+    if should_split:
+        # Split PDF (now with validated/repaired input)
+        try:
+            logger.info(f"Request {request_id}: Starting PDF split operation")
+            parts = split_pdf(tmp_path, split_pages)
+            logger.info(f"Request {request_id}: Split completed, generated {len(parts)} parts")
+        except Exception as e:
+            # If split fails, return original PDF
+            should_split = False
+            logger.warning(
+                f"Request {request_id}: Split operation failed: {e}, returning original PDF"
+            )
+
+    # If we're not splitting, return the original PDF
+    if not should_split:
+        logger.info(f"Request {request_id}: Returning original PDF without splitting")
+
+        # Schedule temp file cleanup
+        if background_tasks:
+            background_tasks.add_task(os.remove, tmp_path)
+            logger.info(f"Request {request_id}: Scheduled temp file cleanup")
+
+        # Record metrics
+        duration = time.time() - start_time
+        from app.api.routes.metrics import split_duration_seconds, split_pages_total
+
+        split_duration_seconds.observe(duration)
+        split_pages_total.inc(1)  # Count as 1 part (the original)
+
+        logger.info(f"Request {request_id}: Operation completed in {duration:.2f} seconds")
+
+        # Clean up old temp files
+        cleanup_temp_files()
+
+        # Return the original PDF as a streaming response
+        return StreamingResponse(
+            BytesIO(repaired_contents),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
+        )
 
     # Record metrics
     duration = time.time() - start_time
@@ -310,28 +390,118 @@ async def split_into_zip_endpoint(
 
     logger.info(f"Request {request_id}: Saved validated/repaired PDF to temp file {tmp_path}")
 
-    # Parse pages JSON
+    # Parse pages JSON and determine if we should split
+    should_split = True
+    split_pages = []
+    parts = None
+
     try:
         pages_data = json.loads(pages)
-        split_request = SplitRequest(**pages_data)
-        split_pages = [page_obj.page for page_obj in split_request.pages]
-        logger.info(f"Request {request_id}: Split pages: {split_pages}")
-    except Exception as e:
-        os.remove(tmp_path)
-        logger.error(f"Request {request_id}: Invalid pages JSON: {e}")
-        raise HTTPException(status_code=422, detail="Invalid pages JSON format.")
 
-    # Split PDF (now with validated/repaired input)
-    try:
-        logger.info(f"Request {request_id}: Starting PDF split operation")
-        parts = split_pdf(tmp_path, split_pages)
-        logger.info(f"Request {request_id}: Split completed, generated {len(parts)} parts")
-    except Exception as e:
-        os.remove(tmp_path)
-        logger.error(f"Request {request_id}: Split error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        # Check if pages field exists and is not empty
+        if "pages" not in pages_data or not pages_data["pages"]:
+            should_split = False
+            logger.info(
+                f"Request {request_id}: Empty or missing pages array, returning original PDF"
+            )
+        else:
+            # Try to parse the pages
+            try:
+                split_request = SplitRequest(**pages_data)
+                split_pages = [page_obj.page for page_obj in split_request.pages]
 
-    # Record metrics
+                # Validate page numbers are in range
+                import pikepdf
+
+                with pikepdf.open(tmp_path) as pdf:
+                    num_pages = len(pdf.pages)
+
+                    for page_num in split_pages:
+                        if page_num < 1 or page_num > num_pages:
+                            should_split = False
+                            logger.info(
+                                f"Request {request_id}: Page {page_num} out of range (1-{num_pages}), returning original PDF"
+                            )
+                            break
+
+                if should_split:
+                    logger.info(f"Request {request_id}: Split pages: {split_pages}")
+
+            except ValueError as ve:
+                # Validation error from SplitRequest (e.g., negative page numbers)
+                should_split = False
+                logger.info(
+                    f"Request {request_id}: Invalid page values: {ve}, returning original PDF"
+                )
+            except Exception as parse_e:
+                # Other parsing errors
+                should_split = False
+                logger.info(
+                    f"Request {request_id}: Failed to parse pages: {parse_e}, returning original PDF"
+                )
+
+    except json.JSONDecodeError as je:
+        should_split = False
+        logger.info(f"Request {request_id}: Invalid JSON format: {je}, returning original PDF")
+    except Exception as e:
+        should_split = False
+        logger.info(
+            f"Request {request_id}: Unexpected error parsing pages: {e}, returning original PDF"
+        )
+
+    # Either split the PDF or return the original
+    if should_split:
+        # Split PDF (now with validated/repaired input)
+        try:
+            logger.info(f"Request {request_id}: Starting PDF split operation")
+            parts = split_pdf(tmp_path, split_pages)
+            logger.info(f"Request {request_id}: Split completed, generated {len(parts)} parts")
+        except Exception as e:
+            # If split fails, return original PDF
+            should_split = False
+            logger.warning(
+                f"Request {request_id}: Split operation failed: {e}, returning original PDF"
+            )
+
+    # If we're not splitting, return the original PDF in a ZIP
+    if not should_split:
+        logger.info(f"Request {request_id}: Returning original PDF in ZIP without splitting")
+
+        # Create ZIP with single file (the original PDF)
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr(file.filename, repaired_contents)
+
+        # Reset buffer pointer to beginning
+        zip_buffer.seek(0)
+
+        # Schedule temp file cleanup
+        if background_tasks:
+            background_tasks.add_task(os.remove, tmp_path)
+            logger.info(f"Request {request_id}: Scheduled temp file cleanup")
+
+        # Record metrics
+        duration = time.time() - start_time
+        from app.api.routes.metrics import split_duration_seconds, split_pages_total
+
+        split_duration_seconds.observe(duration)
+        split_pages_total.inc(1)  # Count as 1 part (the original)
+
+        logger.info(f"Request {request_id}: Operation completed in {duration:.2f} seconds")
+
+        # Clean up old temp files
+        cleanup_temp_files()
+
+        # Return ZIP file
+        zip_filename = f"{os.path.splitext(file.filename)[0]}.zip"
+
+        return Response(
+            content=zip_buffer.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+        )
+
+    # Record metrics for split operation
     duration = time.time() - start_time
     from app.api.routes.metrics import split_duration_seconds, split_pages_total
 
@@ -343,7 +513,7 @@ async def split_into_zip_endpoint(
     # Clean up old temp files
     cleanup_temp_files()
 
-    # Create ZIP file in memory
+    # Create ZIP file in memory with split parts
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for idx, part in enumerate(parts):

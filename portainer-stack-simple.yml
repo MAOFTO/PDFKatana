@@ -3,25 +3,19 @@ version: '3.8'
 services:
   pdfkatana:
     image: pdfkatana:latest
-    container_name: pdfkatana-prod
-    restart: unless-stopped
-    # Don't expose ports externally - NPM will handle this
-    expose:
-      - "8000"
+    container_name: pdfkatana
+    ports:
+      - "8000:8000"
     environment:
-      - MAX_UPLOAD_SIZE_MB=100
-      - MAX_PAGES=100
-      - TEMP_RETENTION_MIN=60
+      - MAX_UPLOAD_SIZE_MB=50
       - MAX_WORKERS=2
-      - LOG_LEVEL=info
-      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - TEMP_FILE_MAX_AGE_HOURS=1
     volumes:
-      - pdfkatana_tmp:/app/src/tmp
-      - pdfkatana_logs:/app/src/logs
-    networks:
-      - pdfkatana_network
+      - ./tmp:/app/tmp
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -34,13 +28,3 @@ services:
         reservations:
           memory: 256M
           cpus: '0.25'
-
-volumes:
-  pdfkatana_tmp:
-    driver: local
-  pdfkatana_logs:
-    driver: local
-
-networks:
-  pdfkatana_network:
-    driver: bridge
